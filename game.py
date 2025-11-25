@@ -6,9 +6,9 @@ from collections import defaultdict
 import math
 
 # ---------- Page config ----------
-st.set_page_config(page_title="Digit Guessing Game (logical solver)", page_icon="🎯", layout="centered")
+st.set_page_config(page_title="Digit Guessing Game (final)", page_icon="🎯", layout="centered")
 
-# ---------- Neon CSS (kept similar to prior) ----------
+# ---------- Neon CSS ----------
 NEON_CSS = """
 <style>
 :root{ --neon:#00d4ff; }
@@ -21,6 +21,7 @@ button[title="neon-btn"]:hover, button[title="neon-order"]:hover { transform: tr
 .selected-badge { display:inline-block; min-width:48px; padding:8px 10px; border-radius:999px; background: linear-gradient(90deg, rgba(0,212,255,0.12), rgba(0,212,255,0.06)); color: #dff8ff; border: 1px solid rgba(0,212,255,0.18); font-weight:700; text-align:center; }
 .log { background: rgba(255,255,255,0.02); padding: 8px; border-radius: 8px; font-size: 13px; color: #dbeeff; margin-bottom: 6px; border: 1px solid rgba(255,255,255,0.02); }
 .small-muted { color: #87b6c6; font-size:12px; }
+.bad { background: rgba(255,60,60,0.12); color: #ffdede; padding: 10px 14px; border-radius:8px; border:1px solid rgba(255,60,60,0.12); }
 </style>
 """
 st.markdown(NEON_CSS, unsafe_allow_html=True)
@@ -28,24 +29,29 @@ st.markdown(NEON_CSS, unsafe_allow_html=True)
 # ---------- Helper functions ----------
 def reset_state():
     st.session_state.update({
-        "stage": "intro",
+        "stage": "intro",        # intro | solver_stage | deterministic_stage | det_query | ordering_stage | done | failed_random
         "max_trials": 30,
         "trials": 0,
-        "tried": set(),
-        "current_guess": None,
-        "recovered_guess": None,
+        "tried": set(),          # ints shown & submitted
+        "current_guess": None,   # stored shown guess (string "0123")
+        "awaiting_answer": False, # True while waiting for Submit/Skip on shown guess
+        "recovered_guess": None, # guess_str when user says 4 (multiset)
         "candidates": UNIQUE_POOL.copy(),
-        "lo": 0, "hi": -1,
-        "seed": None, "logs": [],
-        "rand_match_selected": None, "det_match_selected": None,
-        "digit_counts": None, "det_digit": 0,
+        "lo": 0,
+        "hi": -1,
+        "seed": None,
+        "logs": [],
+        "rand_match_selected": None,
+        "det_match_selected": None,
+        "digit_counts": None,
+        "det_digit": 0,
         "final_answer": None
     })
 
 def add_log(msg):
     logs = st.session_state.get("logs", [])
     logs.insert(0, msg)
-    st.session_state["logs"] = logs[:300]
+    st.session_state["logs"] = logs[:400]
 
 def all_unique_4digit_numbers():
     nums = []
@@ -55,24 +61,29 @@ def all_unique_4digit_numbers():
             nums.append(n)
     return nums
 
-UNIQUE_POOL = all_unique_4digit_numbers()  # 5040 elements
+# precompute pool
+UNIQUE_POOL = all_unique_4digit_numbers()  # 5040 numbers with unique digits
 
 def format_guess(n): return f"{n:04d}"
 
+def generate_candidates_from_multiset_unique(guess_str):
+    digits = list(guess_str)
+    perms = set(permutations(digits, 4))
+    perm_ints = sorted(int(''.join(p)) for p in perms)
+    return perm_ints
+
 def common_digit_count(a_str, b_str):
-    # counts number of value-matches ignoring position (multiset intersection) but digits unique so just set intersection
+    # Unique digits: intersection size is the value-only match count
     return len(set(a_str) & set(b_str))
 
 def filter_candidates_by_feedback(candidates, guess_str, reported_matches):
-    # keep only candidates that would yield reported_matches for the guess
-    new = [c for c in candidates if common_digit_count(format_guess(c), guess_str) == reported_matches]
-    return new
+    return [c for c in candidates if common_digit_count(format_guess(c), guess_str) == reported_matches]
 
 def choose_best_guess(candidates, pool, sample_limit=600):
     """
-    Choose a guess from `pool` (list of ints) that best partitions `candidates`.
-    If pool is large, sample sample_limit candidates from pool.
-    Score = sum(size^2 across match-count buckets) (lower is better).
+    Select a guess from pool that best partitions candidates.
+    If pool large, sample for speed.
+    Score is sum of squares of bucket sizes (lower better).
     """
     n_cand = len(candidates)
     if n_cand == 0:
@@ -83,32 +94,29 @@ def choose_best_guess(candidates, pool, sample_limit=600):
     cand_strs = [format_guess(c) for c in candidates]
     for g in eval_pool:
         g_str = format_guess(g)
-        # bucket counts for match = 0..4
         counts = [0]*5
         for cs in cand_strs:
             m = len(set(cs) & set(g_str))
             counts[m] += 1
-        # score: sum squares (penalize unbalanced large buckets)
         score = sum(c*c for c in counts)
         if score < best_score:
             best_score = score
             best_guess = g
-    # if best_guess is None pick random from candidates
     if best_guess is None:
         return random.choice(candidates)
     return best_guess
 
-# ---------- Initialize ----------
+# ---------- Initialize session state ----------
 if "stage" not in st.session_state:
-    # default candidates = full pool
+    # ensure candidates initially loaded before reset
     st.session_state["candidates"] = UNIQUE_POOL.copy()
     reset_state()
 
 # ---------- Sidebar ----------
 with st.sidebar:
     st.title("🎯 Options")
-    st.markdown("Solver mode: logical filtering of candidates (unique digits enforced).")
-    max_trials = st.number_input("Max random trials", min_value=1, max_value=1000, value=30, step=1)
+    st.markdown("Unique-digit numbers only. Solver chooses logically useful guesses (not naive random).")
+    max_trials = st.number_input("Max solver trials (before fallback)", min_value=1, max_value=1000, value=30, step=1)
     seed_text = st.text_input("Random seed (optional)", value="")
     strategy = st.radio("Digit detection strategy", options=["Solver-driven (recommended)", "Deterministic 10-digit queries (guaranteed)"], index=0)
     st.markdown("---")
@@ -121,17 +129,17 @@ st.session_state["seed"] = int(seed_text) if seed_text.strip().lstrip('-').isdig
 
 # ---------- Header ----------
 st.markdown('<div class="main-card">', unsafe_allow_html=True)
-st.markdown('<div class="header">🎯 Logical Four-digit Mind Reader</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Think of a 4-digit number with unique digits (e.g. 0123). I will reason to discover it.</div>', unsafe_allow_html=True)
+st.markdown('<div class="header">🎯 Final Logical Four-digit Mind Reader</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Think of a 4-digit number with unique digits (e.g. 6175). I will reason to discover it.</div>', unsafe_allow_html=True)
 
 col1, col2 = st.columns([3,1])
 with col1:
     st.markdown("### How this solver works (short)")
     st.markdown("""
-- I maintain a pool of all possible 4-digit numbers with unique digits (5040 possibilities).
-- After each guess you tell me how many digits match (0–4). I filter the pool to only numbers consistent with that response.
-- I choose the next guess to best split remaining possibilities (minimize expected remaining candidates).
-- When the pool is small, decisions are exhaustive; when large, I sample to stay fast.
+- I keep the full set of all unique-digit 4-digit candidates (5040).
+- After each guess you report how many digits (value-only) match (0–4).
+- I filter candidates to those consistent with the reply, then pick the next guess to split the pool efficiently.
+- The shown guess is frozen until you Submit/Skip (no accidental change while clicking).
 """)
 with col2:
     st.markdown("### Info")
@@ -150,12 +158,15 @@ if st.session_state["stage"] == "intro":
                     random.seed(st.session_state["seed"])
                 except:
                     pass
+            # reset gameplay counters but keep pool
             st.session_state["trials"] = 0
             st.session_state["tried"] = set()
             st.session_state["logs"] = []
             st.session_state["rand_match_selected"] = None
             st.session_state["det_match_selected"] = None
             st.session_state["candidates"] = UNIQUE_POOL.copy()
+            st.session_state["current_guess"] = None
+            st.session_state["awaiting_answer"] = False
             add_log("Game started (solver-driven).")
             if strategy.startswith("Solver"):
                 st.session_state["stage"] = "solver_stage"
@@ -165,10 +176,10 @@ if st.session_state["stage"] == "intro":
     with c2:
         st.button("Instructions ❓", key="instr")
 
-# ---------- Deterministic 10-query (unchanged) ----------
+# ---------- Deterministic 10-query ----------
 if st.session_state["stage"] == "deterministic_stage":
     st.markdown("### Deterministic digit detection (10 queries, 0/1 answers)")
-    st.markdown("For each digit 0..9 tell me whether it appears (0/1). Exactly four digits must be '1'.")
+    st.markdown("For each digit 0..9 tell me whether it appears in your secret (0 = no, 1 = yes). Exactly four digits must be '1'.")
     if st.button("Begin 10 queries", key="start_det"):
         st.session_state["digit_counts"] = {str(d): None for d in range(10)}
         st.session_state["det_digit"] = 0
@@ -219,7 +230,7 @@ if st.session_state.get("stage") == "det_query":
                     else:
                         recovered = ''.join(digits)
                         st.session_state["recovered_guess"] = recovered
-                        st.session_state["candidates"] = generate_candidates_from_multiset(recovered)
+                        st.session_state["candidates"] = generate_candidates_from_multiset_unique(recovered)
                         st.session_state["lo"] = 0
                         st.session_state["hi"] = len(st.session_state["candidates"]) - 1
                         st.session_state["stage"] = "ordering_stage"
@@ -230,7 +241,7 @@ if st.session_state.get("stage") == "det_query":
     for l in st.session_state["logs"][:10]:
         st.markdown(f"<div class='log'>{l}</div>", unsafe_allow_html=True)
 
-# ---------- Solver-driven stage (replacement for random stage) ----------
+# ---------- Solver-driven stage (logical guessing) ----------
 if st.session_state["stage"] == "solver_stage":
     st.markdown("### Solver stage — I pick a logical guess")
     st.markdown("I will choose a guess to efficiently narrow the candidate pool. Tell me how many digits match (0–4).")
@@ -240,28 +251,23 @@ if st.session_state["stage"] == "solver_stage":
     st.markdown(f"**Trials:** {trials} / {max_trials}")
     st.markdown(f"**Candidates remaining:** {len(st.session_state['candidates'])}")
 
-    # decide next guess intelligently
     candidates = st.session_state["candidates"]
-    pool_for_guess = candidates  # we can also consider entire UNIQUE_POOL but we restrict to candidates for simplicity
     if len(candidates) == 0:
         st.error("No candidates left — inconsistent answers or secret changed. Restart.")
     else:
-        # choose best guess
-        guess_int = None
-        # if only one candidate left, pick it
-        if len(candidates) == 1:
-            guess_int = candidates[0]
-        else:
-            # choose best candidate (exhaustive if small, sample if large)
-            guess_int = choose_best_guess(candidates, pool_for_guess, sample_limit=600)
+        # compute a new guess only when not awaiting an answer
+        if not st.session_state.get("awaiting_answer", False):
+            if len(candidates) == 1:
+                guess_int = candidates[0]
+            else:
+                pool_for_guess = candidates
+                guess_int = choose_best_guess(candidates, pool_for_guess, sample_limit=600)
 
-        # set current guess if not set this round
-        if st.session_state["current_guess"] is None or st.session_state["current_guess"] != format_guess(guess_int):
             st.session_state["current_guess"] = format_guess(guess_int)
-            # note: do not add to tried until user submits (but we count trial when user sees and answers)
-            # increment trials now to reflect an attempt shown
+            st.session_state["awaiting_answer"] = True
             st.session_state["trials"] += 1
 
+        # show the frozen guess
         guess_str = st.session_state["current_guess"]
         st.markdown(f"## My guess:  **{guess_str}**")
 
@@ -283,12 +289,13 @@ if st.session_state["stage"] == "solver_stage":
                     st.warning("Please select 0–4 before submitting.")
                 else:
                     add_log(f"Guess #{st.session_state['trials']}: {guess_str} → matches {sel}")
-                    # filter candidates
+                    # apply filter based on the shown guess
                     new_cands = filter_candidates_by_feedback(st.session_state["candidates"], guess_str, sel)
                     st.session_state["candidates"] = new_cands
                     st.session_state["tried"].add(int(guess_str))
                     st.session_state["rand_match_selected"] = None
-                    # if match==4 we recovered digits (unique)
+                    st.session_state["awaiting_answer"] = False
+
                     if sel == 4:
                         st.session_state["recovered_guess"] = guess_str
                         st.session_state["candidates"] = generate_candidates_from_multiset_unique(guess_str)
@@ -298,12 +305,10 @@ if st.session_state["stage"] == "solver_stage":
                         add_log(f"Recovered digits: {guess_str} (unique multiset)")
                         st.rerun()
                     else:
-                        # check trial limit
                         if st.session_state["trials"] >= st.session_state["max_trials"]:
                             st.warning("Reached max trials without collecting a '4'. You can restart, or switch to deterministic method.")
                             st.session_state["stage"] = "failed_random"
                             st.rerun()
-                        # continue with updated candidate pool — next rerun will choose next guess
                         st.session_state["current_guess"] = None
                         st.rerun()
         with c2:
@@ -311,13 +316,14 @@ if st.session_state["stage"] == "solver_stage":
                 add_log(f"Skipped guess {guess_str}")
                 st.session_state["current_guess"] = None
                 st.session_state["rand_match_selected"] = None
+                st.session_state["awaiting_answer"] = False
                 st.rerun()
 
     st.markdown("#### Recent logs")
     for l in st.session_state["logs"][:8]:
         st.markdown(f"<div class='log'>{l}</div>", unsafe_allow_html=True)
 
-# ---------- Failed random fallback ----------
+# ---------- Failed fallback ----------
 if st.session_state["stage"] == "failed_random":
     st.error("Solver stage failed to find match=4 within trial limit.")
     col1, col2 = st.columns(2)
@@ -330,7 +336,7 @@ if st.session_state["stage"] == "failed_random":
             reset_state()
             st.rerun()
 
-# ---------- Ordering stage (binary search over permutations) ----------
+# ---------- Ordering stage ----------
 if st.session_state["stage"] == "ordering_stage":
     candidates = st.session_state["candidates"]
     lo = st.session_state["lo"]; hi = st.session_state["hi"]
